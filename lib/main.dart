@@ -52,6 +52,7 @@ class LostItem {
   final String status;
   final String date;
   final Uint8List? imageBytes;
+  final bool isMine;
 
   LostItem({
     required this.title,
@@ -61,6 +62,7 @@ class LostItem {
     required this.status,
     required this.date,
     this.imageBytes,
+    this.isMine = false,
   });
 }
 
@@ -75,6 +77,7 @@ class _HomePageState extends State<HomePage> {
   final TextEditingController searchController = TextEditingController();
 
   String selectedCategory = 'Semua';
+  String selectedStatus = 'Semua';
   int selectedNavigation = 0;
 
   final List<String> categories = [
@@ -126,10 +129,10 @@ class _HomePageState extends State<HomePage> {
     ),
   ];
 
-  List<LostItem> get filteredItems {
-    return items.where((item) {
-      final query = searchController.text.toLowerCase();
+  List<LostItem> get searchCategoryItems {
+    final query = searchController.text.toLowerCase();
 
+    return items.where((item) {
       final matchesSearch =
           item.title.toLowerCase().contains(query) ||
           item.location.toLowerCase().contains(query) ||
@@ -140,6 +143,13 @@ class _HomePageState extends State<HomePage> {
 
       return matchesSearch && matchesCategory;
     }).toList();
+  }
+
+  List<LostItem> get filteredItems {
+    final base = searchCategoryItems;
+    if (selectedStatus == 'Semua') return base;
+
+    return base.where((item) => item.status == selectedStatus).toList();
   }
 
   @override
@@ -211,6 +221,7 @@ class _HomePageState extends State<HomePage> {
             setState(() {
               items.insert(0, newItem);
               selectedCategory = 'Semua';
+              selectedStatus = 'Semua';
               searchController.clear();
               selectedNavigation = 0;
             });
@@ -333,6 +344,39 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  void confirmDelete(LostItem item) {
+    showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Hapus laporan?'),
+          content: Text('"${item.title}" akan dihapus dari daftar.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Batal'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text('Hapus'),
+            ),
+          ],
+        );
+      },
+    ).then((confirmed) {
+      if (confirmed != true || !mounted) return;
+
+      setState(() {
+        items.remove(item);
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Laporan dihapus.')),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -386,6 +430,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget buildHome() {
+    final base = searchCategoryItems;
+    final lostCount = base.where((item) => item.status == 'Hilang').length;
+    final foundCount = base.where((item) => item.status == 'Ditemukan').length;
+
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(
@@ -512,6 +560,44 @@ class _HomePageState extends State<HomePage> {
                         showCheckmark: false,
                       );
                     },
+                  ),
+                ),
+                const SizedBox(height: 22),
+                const Text(
+                  'Jenis Laporan',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: darkGreen,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<String>(
+                  segments: [
+                    ButtonSegment(
+                      value: 'Semua',
+                      label: Text('Semua (${base.length})'),
+                    ),
+                    ButtonSegment(
+                      value: 'Hilang',
+                      label: Text('Hilang ($lostCount)'),
+                    ),
+                    ButtonSegment(
+                      value: 'Ditemukan',
+                      label: Text('Ditemukan ($foundCount)'),
+                    ),
+                  ],
+                  selected: {selectedStatus},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (selection) {
+                    setState(() {
+                      selectedStatus = selection.first;
+                    });
+                  },
+                  style: SegmentedButton.styleFrom(
+                    selectedBackgroundColor: primaryGreen,
+                    selectedForegroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                   ),
                 ),
                 const SizedBox(height: 25),
@@ -652,16 +738,14 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Daftar laporan yang telah dibuat selama sesi ini.',
+            'Daftar laporan yang kamu buat.',
             style: TextStyle(color: Colors.grey),
           ),
           const SizedBox(height: 22),
           Expanded(
             child: Builder(
               builder: (context) {
-                final myItems = items
-                    .where((item) => item.date == 'Baru saja')
-                    .toList();
+                final myItems = items.where((item) => item.isMine).toList();
 
                 if (myItems.isEmpty) {
                   return const Center(
@@ -695,6 +779,7 @@ class _HomePageState extends State<HomePage> {
                     return ItemCard(
                       item: myItems[index],
                       onTap: () => openDetail(myItems[index]),
+                      onDelete: () => confirmDelete(myItems[index]),
                     );
                   },
                 );
@@ -826,6 +911,7 @@ class _ReportPageState extends State<ReportPage> {
       status: widget.status,
       date: 'Baru saja',
       imageBytes: imageBytes,
+      isMine: true,
     );
 
     widget.onSubmit(newItem);
@@ -1096,8 +1182,14 @@ InputDecoration inputDecoration(String hint, IconData icon) {
 class ItemCard extends StatelessWidget {
   final LostItem item;
   final VoidCallback onTap;
+  final VoidCallback? onDelete;
 
-  const ItemCard({super.key, required this.item, required this.onTap});
+  const ItemCard({
+    super.key,
+    required this.item,
+    required this.onTap,
+    this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1190,7 +1282,14 @@ class ItemCard extends StatelessWidget {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: Colors.grey),
+            if (onDelete != null)
+              IconButton(
+                onPressed: onDelete,
+                tooltip: 'Hapus laporan',
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+              )
+            else
+              const Icon(Icons.chevron_right, color: Colors.grey),
           ],
         ),
       ),
