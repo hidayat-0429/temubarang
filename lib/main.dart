@@ -512,8 +512,44 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 const SizedBox(height: 22),
-                buildBanner(),
-                const SizedBox(height: 25),
+                const Text(
+                  'Jenis Laporan',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: darkGreen,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<String>(
+                  segments: [
+                    ButtonSegment(
+                      value: 'Semua',
+                      label: Text('Semua (${base.length})'),
+                    ),
+                    ButtonSegment(
+                      value: 'Hilang',
+                      label: Text('Hilang ($lostCount)'),
+                    ),
+                    ButtonSegment(
+                      value: 'Ditemukan',
+                      label: Text('Ditemukan ($foundCount)'),
+                    ),
+                  ],
+                  selected: {selectedStatus},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (selection) {
+                    setState(() {
+                      selectedStatus = selection.first;
+                    });
+                  },
+                  style: SegmentedButton.styleFrom(
+                    selectedBackgroundColor: primaryGreen,
+                    selectedForegroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                ),
+                const SizedBox(height: 22),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -563,43 +599,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 const SizedBox(height: 22),
-                const Text(
-                  'Jenis Laporan',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: darkGreen,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                SegmentedButton<String>(
-                  segments: [
-                    ButtonSegment(
-                      value: 'Semua',
-                      label: Text('Semua (${base.length})'),
-                    ),
-                    ButtonSegment(
-                      value: 'Hilang',
-                      label: Text('Hilang ($lostCount)'),
-                    ),
-                    ButtonSegment(
-                      value: 'Ditemukan',
-                      label: Text('Ditemukan ($foundCount)'),
-                    ),
-                  ],
-                  selected: {selectedStatus},
-                  showSelectedIcon: false,
-                  onSelectionChanged: (selection) {
-                    setState(() {
-                      selectedStatus = selection.first;
-                    });
-                  },
-                  style: SegmentedButton.styleFrom(
-                    selectedBackgroundColor: primaryGreen,
-                    selectedForegroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                  ),
-                ),
+                buildBanner(),
                 const SizedBox(height: 25),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
