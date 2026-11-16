@@ -1,9 +1,11 @@
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
 
 void main() {
   runApp(const TemuBarangApp());
@@ -47,23 +49,25 @@ class TemuBarangApp extends StatelessWidget {
 }
 
 class LostItem {
+  final int? id;
   final String title;
   final String category;
   final String location;
   final String description;
   final String status;
   final DateTime createdAt;
-  final Uint8List? imageBytes;
+  final List<String> photoPaths;
   final bool isMine;
 
   LostItem({
+    this.id,
     required this.title,
     required this.category,
     required this.location,
     required this.description,
     required this.status,
     required this.createdAt,
-    this.imageBytes,
+    this.photoPaths = const [],
     this.isMine = false,
   });
 
@@ -79,30 +83,135 @@ class LostItem {
     return '${createdAt.day}/${createdAt.month}/${createdAt.year}';
   }
 
-  Map<String, dynamic> toJson() => {
+  Map<String, Object?> toRow() => {
+    'id': id,
     'title': title,
     'category': category,
     'location': location,
     'description': description,
     'status': status,
     'createdAt': createdAt.millisecondsSinceEpoch,
-    'image': imageBytes == null ? null : base64Encode(imageBytes!),
-    'isMine': isMine,
+    'isMine': isMine ? 1 : 0,
+    'photos': jsonEncode(photoPaths),
   };
 
-  factory LostItem.fromJson(Map<String, dynamic> json) => LostItem(
-    title: json['title'] as String,
-    category: json['category'] as String,
-    location: json['location'] as String,
-    description: json['description'] as String,
-    status: json['status'] as String,
-    createdAt: DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int),
-    imageBytes: json['image'] == null
-        ? null
-        : base64Decode(json['image'] as String),
-    isMine: json['isMine'] as bool? ?? false,
+  factory LostItem.fromRow(Map<String, Object?> row) => LostItem(
+    id: row['id'] as int?,
+    title: row['title'] as String,
+    category: row['category'] as String,
+    location: row['location'] as String,
+    description: row['description'] as String,
+    status: row['status'] as String,
+    createdAt: DateTime.fromMillisecondsSinceEpoch(row['createdAt'] as int),
+    photoPaths: List<String>.from(jsonDecode(row['photos'] as String) as List),
+    isMine: (row['isMine'] as int) == 1,
   );
 }
+
+Future<String> savePhotoFile(XFile image, int index) async {
+  final dir = await getApplicationDocumentsDirectory();
+  final photosDir = Directory(p.join(dir.path, 'photos'));
+  if (!await photosDir.exists()) await photosDir.create(recursive: true);
+  final saved = await File(image.path).copy(
+    p.join(
+      photosDir.path,
+      '${DateTime.now().millisecondsSinceEpoch}_$index.jpg',
+    ),
+  );
+  return saved.path;
+}
+
+Future<void> deletePhotoFiles(Iterable<String> paths) async {
+  for (final path in paths) {
+    final file = File(path);
+    if (await file.exists()) await file.delete();
+  }
+}
+
+class ReportDb {
+  static Database? _db;
+
+  static Future<Database> _open() async {
+    if (_db != null) return _db!;
+    _db = await openDatabase(
+      p.join(await getDatabasesPath(), 'temubarang.db'),
+      version: 1,
+      onCreate: (db, version) => db.execute(
+        'CREATE TABLE reports('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'title TEXT, category TEXT, location TEXT, description TEXT, '
+        'status TEXT, createdAt INTEGER, isMine INTEGER, photos TEXT)',
+      ),
+    );
+    return _db!;
+  }
+
+  static Future<List<LostItem>> loadAll() async {
+    final db = await _open();
+    final rows = await db.query('reports', orderBy: 'createdAt DESC, id DESC');
+    return rows.map(LostItem.fromRow).toList();
+  }
+
+  static Future<void> insert(LostItem item) async {
+    final db = await _open();
+    await db.insert('reports', item.toRow());
+  }
+
+  static Future<void> update(LostItem item) async {
+    final db = await _open();
+    await db.update(
+      'reports',
+      item.toRow(),
+      where: 'id = ?',
+      whereArgs: [item.id],
+    );
+  }
+
+  static Future<void> delete(int id) async {
+    final db = await _open();
+    await db.delete('reports', where: 'id = ?', whereArgs: [id]);
+  }
+}
+
+List<LostItem> seedItems() => [
+  LostItem(
+    title: 'Dompet warna hitam',
+    category: 'Dompet',
+    location: 'Area Kampus',
+    description:
+        'Dompet warna hitam tertinggal di sekitar area kampus. '
+        'Di dalamnya terdapat beberapa kartu.',
+    status: 'Hilang',
+    createdAt: DateTime.now(),
+  ),
+  LostItem(
+    title: 'Headphone Bluetooth',
+    category: 'Elektronik',
+    location: 'Perpustakaan',
+    description:
+        'Headphone Bluetooth warna putih ditemukan di meja '
+        'perpustakaan.',
+    status: 'Ditemukan',
+    createdAt: DateTime.now(),
+  ),
+  LostItem(
+    title: 'Kartu mahasiswa',
+    category: 'Dokumen',
+    location: 'Gedung Fakultas',
+    description:
+        'Kartu mahasiswa ditemukan di dekat pintu masuk gedung fakultas.',
+    status: 'Ditemukan',
+    createdAt: DateTime.now().subtract(const Duration(days: 1)),
+  ),
+  LostItem(
+    title: 'Jam tangan',
+    category: 'Aksesoris',
+    location: 'Lapangan Kampus',
+    description: 'Jam tangan tertinggal di sekitar lapangan kampus.',
+    status: 'Hilang',
+    createdAt: DateTime.now().subtract(const Duration(days: 1)),
+  ),
+];
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -127,73 +236,31 @@ class _HomePageState extends State<HomePage> {
     'Lainnya',
   ];
 
-  final List<LostItem> items = [
-    LostItem(
-      title: 'Dompet warna hitam',
-      category: 'Dompet',
-      location: 'Area Kampus',
-      description:
-          'Dompet warna hitam tertinggal di sekitar area kampus. '
-          'Di dalamnya terdapat beberapa kartu.',
-      status: 'Hilang',
-      createdAt: DateTime.now(),
-    ),
-    LostItem(
-      title: 'Headphone Bluetooth',
-      category: 'Elektronik',
-      location: 'Perpustakaan',
-      description:
-          'Headphone Bluetooth warna putih ditemukan di meja '
-          'perpustakaan.',
-      status: 'Ditemukan',
-      createdAt: DateTime.now(),
-    ),
-    LostItem(
-      title: 'Kartu mahasiswa',
-      category: 'Dokumen',
-      location: 'Gedung Fakultas',
-      description:
-          'Kartu mahasiswa ditemukan di dekat pintu masuk gedung fakultas.',
-      status: 'Ditemukan',
-      createdAt: DateTime.now().subtract(const Duration(days: 1)),
-    ),
-    LostItem(
-      title: 'Jam tangan',
-      category: 'Aksesoris',
-      location: 'Lapangan Kampus',
-      description: 'Jam tangan tertinggal di sekitar lapangan kampus.',
-      status: 'Hilang',
-      createdAt: DateTime.now().subtract(const Duration(days: 1)),
-    ),
-  ];
+  final List<LostItem> items = [];
 
   @override
   void initState() {
     super.initState();
-    loadItems();
+    initItems();
   }
 
-  Future<void> loadItems() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('reports');
-    if (raw == null || !mounted) return;
+  Future<void> initItems() async {
+    if ((await ReportDb.loadAll()).isEmpty) {
+      for (final item in seedItems()) {
+        await ReportDb.insert(item);
+      }
+    }
+    await refreshItems();
+  }
 
-    final saved = (jsonDecode(raw) as List)
-        .map((e) => LostItem.fromJson(e as Map<String, dynamic>))
-        .toList();
+  Future<void> refreshItems() async {
+    final saved = await ReportDb.loadAll();
+    if (!mounted) return;
     setState(() {
       items
         ..clear()
         ..addAll(saved);
     });
-  }
-
-  Future<void> saveItems() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'reports',
-      jsonEncode(items.map((e) => e.toJson()).toList()),
-    );
   }
 
   List<LostItem> get searchCategoryItems {
@@ -278,21 +345,31 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  void openReportForm(String status) {
+  void openReportForm(String status, {LostItem? existing}) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ReportPage(
           status: status,
-          onSubmit: (newItem) {
+          existing: existing,
+          onSubmit: (item) async {
+            if (item.id == null) {
+              await ReportDb.insert(item);
+            } else {
+              final old = items.firstWhere((e) => e.id == item.id);
+              await deletePhotoFiles(
+                old.photoPaths.where((path) => !item.photoPaths.contains(path)),
+              );
+              await ReportDb.update(item);
+            }
+            if (!mounted) return;
             setState(() {
-              items.insert(0, newItem);
               selectedCategory = 'Semua';
               selectedStatus = 'Semua';
               searchController.clear();
               selectedNavigation = 0;
             });
-            saveItems();
+            await refreshItems();
           },
         ),
       ),
@@ -326,14 +403,29 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 const SizedBox(height: 22),
-                if (item.imageBytes != null)
+                if (item.photoPaths.isNotEmpty)
                   ClipRRect(
                     borderRadius: BorderRadius.circular(18),
-                    child: Image.memory(
-                      item.imageBytes!,
-                      width: double.infinity,
+                    child: SizedBox(
                       height: 220,
-                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      child: PageView.builder(
+                        itemCount: item.photoPaths.length,
+                        itemBuilder: (context, index) => Image.file(
+                          File(item.photoPaths[index]),
+                          width: double.infinity,
+                          height: 220,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            color: const Color(0xFFE8EFE8),
+                            child: const Icon(
+                              Icons.broken_image_outlined,
+                              size: 60,
+                              color: primaryGreen,
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   )
                 else
@@ -348,6 +440,14 @@ class _HomePageState extends State<HomePage> {
                       Icons.inventory_2_outlined,
                       size: 75,
                       color: primaryGreen,
+                    ),
+                  ),
+                if (item.photoPaths.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      '${item.photoPaths.length} foto — geser untuk melihat',
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
                     ),
                   ),
                 const SizedBox(height: 20),
@@ -432,14 +532,14 @@ class _HomePageState extends State<HomePage> {
           ],
         );
       },
-    ).then((confirmed) {
+    ).then((confirmed) async {
       if (confirmed != true || !mounted) return;
 
-      setState(() {
-        items.remove(item);
-      });
-      saveItems();
+      await ReportDb.delete(item.id!);
+      await deletePhotoFiles(item.photoPaths);
+      await refreshItems();
 
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Laporan dihapus.')),
       );
@@ -848,6 +948,10 @@ class _HomePageState extends State<HomePage> {
                     return ItemCard(
                       item: myItems[index],
                       onTap: () => openDetail(myItems[index]),
+                      onEdit: () => openReportForm(
+                        myItems[index].status,
+                        existing: myItems[index],
+                      ),
                       onDelete: () => confirmDelete(myItems[index]),
                     );
                   },
@@ -918,8 +1022,14 @@ class _HomePageState extends State<HomePage> {
 class ReportPage extends StatefulWidget {
   final String status;
   final Function(LostItem) onSubmit;
+  final LostItem? existing;
 
-  const ReportPage({super.key, required this.status, required this.onSubmit});
+  const ReportPage({
+    super.key,
+    required this.status,
+    required this.onSubmit,
+    this.existing,
+  });
 
   @override
   State<ReportPage> createState() => _ReportPageState();
@@ -935,7 +1045,20 @@ class _ReportPageState extends State<ReportPage> {
   final ImagePicker imagePicker = ImagePicker();
 
   String selectedCategory = 'Elektronik';
-  Uint8List? imageBytes;
+  List<String> photoPaths = [];
+
+  @override
+  void initState() {
+    super.initState();
+    final existing = widget.existing;
+    if (existing != null) {
+      titleController.text = existing.title;
+      locationController.text = existing.location;
+      descriptionController.text = existing.description;
+      selectedCategory = existing.category;
+      photoPaths = List.of(existing.photoPaths);
+    }
+  }
 
   final List<String> categoryOptions = [
     'Elektronik',
@@ -945,21 +1068,22 @@ class _ReportPageState extends State<ReportPage> {
     'Lainnya',
   ];
 
-  Future<void> pickImage() async {
+  Future<void> pickPhotos() async {
     try {
-      final XFile? image = await imagePicker.pickImage(
-        source: ImageSource.gallery,
+      final images = await imagePicker.pickMultiImage(
         imageQuality: 75,
         maxWidth: 1200,
       );
+      if (images.isEmpty) return;
 
-      if (image != null) {
-        final bytes = await image.readAsBytes();
-
-        setState(() {
-          imageBytes = bytes;
-        });
+      final saved = <String>[];
+      for (var i = 0; i < images.length; i++) {
+        saved.add(await savePhotoFile(images[i], i));
       }
+      if (!mounted) return;
+      setState(() {
+        photoPaths.addAll(saved);
+      });
     } catch (e) {
       if (!mounted) return;
 
@@ -973,21 +1097,26 @@ class _ReportPageState extends State<ReportPage> {
     if (!formKey.currentState!.validate()) return;
 
     final newItem = LostItem(
+      id: widget.existing?.id,
       title: titleController.text.trim(),
       category: selectedCategory,
       location: locationController.text.trim(),
       description: descriptionController.text.trim(),
       status: widget.status,
-      createdAt: DateTime.now(),
-      imageBytes: imageBytes,
+      createdAt: widget.existing?.createdAt ?? DateTime.now(),
+      photoPaths: photoPaths,
       isMine: true,
     );
 
     widget.onSubmit(newItem);
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Laporan berhasil ditambahkan!'),
+      SnackBar(
+        content: Text(
+          widget.existing == null
+              ? 'Laporan berhasil ditambahkan!'
+              : 'Laporan diperbarui.',
+        ),
         backgroundColor: primaryGreen,
       ),
     );
@@ -1007,9 +1136,9 @@ class _ReportPageState extends State<ReportPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Buat Laporan',
-          style: TextStyle(fontWeight: FontWeight.bold),
+        title: Text(
+          widget.existing == null ? 'Buat Laporan' : 'Edit Laporan',
+          style: const TextStyle(fontWeight: FontWeight.bold),
         ),
         backgroundColor: backgroundColor,
         surfaceTintColor: backgroundColor,
@@ -1059,68 +1188,108 @@ class _ReportPageState extends State<ReportPage> {
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 10),
-              GestureDetector(
-                onTap: pickImage,
-                child: Container(
-                  height: 190,
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE8EFE8),
-                    borderRadius: BorderRadius.circular(17),
-                    border: Border.all(
-                      color: const Color(0xFFC8D8C9),
-                      width: 1.5,
-                    ),
-                  ),
-                  child: imageBytes == null
-                      ? const Column(
+              SizedBox(
+                height: 110,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    for (var i = 0; i < photoPaths.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 10),
+                        child: Stack(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(13),
+                              child: Image.file(
+                                File(photoPaths[i]),
+                                width: 100,
+                                height: 110,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Container(
+                                  width: 100,
+                                  height: 110,
+                                  color: const Color(0xFFE8EFE8),
+                                  child: const Icon(
+                                    Icons.broken_image_outlined,
+                                    color: primaryGreen,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: GestureDetector(
+                                onTap: () {
+                                  final path = photoPaths[i];
+                                  setState(() {
+                                    photoPaths.removeAt(i);
+                                  });
+                                  if (!(widget.existing?.photoPaths
+                                          .contains(path) ??
+                                      false)) {
+                                    deletePhotoFiles([path]);
+                                  }
+                                },
+                                child: Container(
+                                  padding: const EdgeInsets.all(3),
+                                  decoration: const BoxDecoration(
+                                    color: Colors.black54,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(
+                                    Icons.close,
+                                    size: 14,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    GestureDetector(
+                      onTap: pickPhotos,
+                      child: Container(
+                        width: 100,
+                        height: 110,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8EFE8),
+                          borderRadius: BorderRadius.circular(13),
+                          border: Border.all(
+                            color: const Color(0xFFC8D8C9),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: const Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
                               Icons.add_photo_alternate_outlined,
-                              size: 48,
+                              size: 30,
                               color: primaryGreen,
                             ),
-                            SizedBox(height: 10),
+                            SizedBox(height: 6),
                             Text(
-                              'Pilih Foto Barang',
+                              'Tambah Foto',
                               style: TextStyle(
                                 color: primaryGreen,
+                                fontSize: 10,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            SizedBox(height: 5),
-                            Text(
-                              'Ketuk untuk mengambil foto dari galeri',
-                              style: TextStyle(
-                                color: Colors.grey,
-                                fontSize: 11,
-                              ),
-                            ),
                           ],
-                        )
-                      : ClipRRect(
-                          borderRadius: BorderRadius.circular(16),
-                          child: Image.memory(
-                            imageBytes!,
-                            width: double.infinity,
-                            height: 190,
-                            fit: BoxFit.cover,
-                          ),
                         ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              if (imageBytes != null)
-                TextButton.icon(
-                  onPressed: () {
-                    setState(() {
-                      imageBytes = null;
-                    });
-                  },
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Hapus foto'),
-                  style: TextButton.styleFrom(foregroundColor: Colors.red),
-                ),
+              const SizedBox(height: 6),
+              const Text(
+                'Bisa lebih dari satu foto.',
+                style: TextStyle(color: Colors.grey, fontSize: 11),
+              ),
               const SizedBox(height: 20),
               const Text(
                 'Nama Barang',
@@ -1251,12 +1420,14 @@ InputDecoration inputDecoration(String hint, IconData icon) {
 class ItemCard extends StatelessWidget {
   final LostItem item;
   final VoidCallback onTap;
+  final VoidCallback? onEdit;
   final VoidCallback? onDelete;
 
   const ItemCard({
     super.key,
     required this.item,
     required this.onTap,
+    this.onEdit,
     this.onDelete,
   });
 
@@ -1282,12 +1453,22 @@ class ItemCard extends StatelessWidget {
           children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(13),
-              child: item.imageBytes != null
-                  ? Image.memory(
-                      item.imageBytes!,
+              child: item.photoPaths.isNotEmpty
+                  ? Image.file(
+                      File(item.photoPaths.first),
                       width: 95,
                       height: 100,
                       fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                        width: 95,
+                        height: 100,
+                        color: const Color(0xFFE8EFE8),
+                        child: const Icon(
+                          Icons.broken_image_outlined,
+                          size: 37,
+                          color: primaryGreen,
+                        ),
+                      ),
                     )
                   : Container(
                       width: 95,
@@ -1351,13 +1532,19 @@ class ItemCard extends StatelessWidget {
                 ],
               ),
             ),
+            if (onEdit != null)
+              IconButton(
+                onPressed: onEdit,
+                tooltip: 'Edit laporan',
+                icon: const Icon(Icons.edit_outlined, color: primaryGreen),
+              ),
             if (onDelete != null)
               IconButton(
                 onPressed: onDelete,
                 tooltip: 'Hapus laporan',
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
               )
-            else
+            else if (onEdit == null)
               const Icon(Icons.chevron_right, color: Colors.grey),
           ],
         ),
