@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const TemuBarangApp());
@@ -50,7 +52,7 @@ class LostItem {
   final String location;
   final String description;
   final String status;
-  final String date;
+  final DateTime createdAt;
   final Uint8List? imageBytes;
   final bool isMine;
 
@@ -60,10 +62,46 @@ class LostItem {
     required this.location,
     required this.description,
     required this.status,
-    required this.date,
+    required this.createdAt,
     this.imageBytes,
     this.isMine = false,
   });
+
+  String get date {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(createdAt.year, createdAt.month, createdAt.day);
+    final diff = today.difference(day).inDays;
+    if (diff == 0) {
+      return now.difference(createdAt).inMinutes < 1 ? 'Baru saja' : 'Hari ini';
+    }
+    if (diff == 1) return 'Kemarin';
+    return '${createdAt.day}/${createdAt.month}/${createdAt.year}';
+  }
+
+  Map<String, dynamic> toJson() => {
+    'title': title,
+    'category': category,
+    'location': location,
+    'description': description,
+    'status': status,
+    'createdAt': createdAt.millisecondsSinceEpoch,
+    'image': imageBytes == null ? null : base64Encode(imageBytes!),
+    'isMine': isMine,
+  };
+
+  factory LostItem.fromJson(Map<String, dynamic> json) => LostItem(
+    title: json['title'] as String,
+    category: json['category'] as String,
+    location: json['location'] as String,
+    description: json['description'] as String,
+    status: json['status'] as String,
+    createdAt: DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int),
+    imageBytes: json['image'] == null
+        ? null
+        : base64Decode(json['image'] as String),
+    isMine: json['isMine'] as bool? ?? false,
+  );
 }
 
 class HomePage extends StatefulWidget {
@@ -98,7 +136,7 @@ class _HomePageState extends State<HomePage> {
           'Dompet warna hitam tertinggal di sekitar area kampus. '
           'Di dalamnya terdapat beberapa kartu.',
       status: 'Hilang',
-      date: 'Hari ini',
+      createdAt: DateTime.now(),
     ),
     LostItem(
       title: 'Headphone Bluetooth',
@@ -108,7 +146,7 @@ class _HomePageState extends State<HomePage> {
           'Headphone Bluetooth warna putih ditemukan di meja '
           'perpustakaan.',
       status: 'Ditemukan',
-      date: 'Hari ini',
+      createdAt: DateTime.now(),
     ),
     LostItem(
       title: 'Kartu mahasiswa',
@@ -117,7 +155,7 @@ class _HomePageState extends State<HomePage> {
       description:
           'Kartu mahasiswa ditemukan di dekat pintu masuk gedung fakultas.',
       status: 'Ditemukan',
-      date: 'Kemarin',
+      createdAt: DateTime.now().subtract(const Duration(days: 1)),
     ),
     LostItem(
       title: 'Jam tangan',
@@ -125,9 +163,38 @@ class _HomePageState extends State<HomePage> {
       location: 'Lapangan Kampus',
       description: 'Jam tangan tertinggal di sekitar lapangan kampus.',
       status: 'Hilang',
-      date: 'Kemarin',
+      createdAt: DateTime.now().subtract(const Duration(days: 1)),
     ),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    loadItems();
+  }
+
+  Future<void> loadItems() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('reports');
+    if (raw == null || !mounted) return;
+
+    final saved = (jsonDecode(raw) as List)
+        .map((e) => LostItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+    setState(() {
+      items
+        ..clear()
+        ..addAll(saved);
+    });
+  }
+
+  Future<void> saveItems() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'reports',
+      jsonEncode(items.map((e) => e.toJson()).toList()),
+    );
+  }
 
   List<LostItem> get searchCategoryItems {
     final query = searchController.text.toLowerCase();
@@ -225,6 +292,7 @@ class _HomePageState extends State<HomePage> {
               searchController.clear();
               selectedNavigation = 0;
             });
+            saveItems();
           },
         ),
       ),
@@ -370,6 +438,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         items.remove(item);
       });
+      saveItems();
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Laporan dihapus.')),
@@ -909,7 +978,7 @@ class _ReportPageState extends State<ReportPage> {
       location: locationController.text.trim(),
       description: descriptionController.text.trim(),
       status: widget.status,
-      date: 'Baru saja',
+      createdAt: DateTime.now(),
       imageBytes: imageBytes,
       isMine: true,
     );
