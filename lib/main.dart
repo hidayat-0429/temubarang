@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
@@ -57,7 +58,7 @@ class LostItem {
   final String status;
   final DateTime createdAt;
   final List<String> photoPaths;
-  final bool isMine;
+  final int? userId;
 
   LostItem({
     this.id,
@@ -68,7 +69,7 @@ class LostItem {
     required this.status,
     required this.createdAt,
     this.photoPaths = const [],
-    this.isMine = false,
+    this.userId,
   });
 
   String get date {
@@ -91,7 +92,7 @@ class LostItem {
     'description': description,
     'status': status,
     'createdAt': createdAt.millisecondsSinceEpoch,
-    'isMine': isMine ? 1 : 0,
+    'userId': userId,
     'photos': jsonEncode(photoPaths),
   };
 
@@ -104,8 +105,16 @@ class LostItem {
     status: row['status'] as String,
     createdAt: DateTime.fromMillisecondsSinceEpoch(row['createdAt'] as int),
     photoPaths: List<String>.from(jsonDecode(row['photos'] as String) as List),
-    isMine: (row['isMine'] as int) == 1,
+    userId: row['userId'] as int?,
   );
+}
+
+class User {
+  final int id;
+  final String name;
+  final String username;
+
+  const User({required this.id, required this.name, required this.username});
 }
 
 Future<String> savePhotoFile(XFile image, int index) async {
@@ -135,15 +144,111 @@ class ReportDb {
     if (_db != null) return _db!;
     _db = await openDatabase(
       p.join(await getDatabasesPath(), 'temubarang.db'),
-      version: 1,
-      onCreate: (db, version) => db.execute(
-        'CREATE TABLE reports('
-        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
-        'title TEXT, category TEXT, location TEXT, description TEXT, '
-        'status TEXT, createdAt INTEGER, isMine INTEGER, photos TEXT)',
-      ),
+      version: 2,
+      onCreate: (db, version) async {
+        await db.execute(
+          'CREATE TABLE reports('
+          'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+          'title TEXT, category TEXT, location TEXT, description TEXT, '
+          'status TEXT, createdAt INTEGER, userId INTEGER, photos TEXT)',
+        );
+        await _createAuthTables(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('ALTER TABLE reports ADD COLUMN userId INTEGER');
+          await _createAuthTables(db);
+        }
+      },
     );
     return _db!;
+  }
+
+  static Future<void> _createAuthTables(Database db) async {
+    await db.execute(
+      'CREATE TABLE users('
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+      'name TEXT, username TEXT UNIQUE, passwordHash TEXT)',
+    );
+    await db.execute(
+      'CREATE TABLE session(id INTEGER PRIMARY KEY, userId INTEGER)',
+    );
+  }
+
+  static String _hash(String password) =>
+      sha256.convert(utf8.encode(password)).toString();
+
+  static Future<User?> register(
+    String name,
+    String username,
+    String password,
+  ) async {
+    final db = await _open();
+    final existing = await db.query(
+      'users',
+      where: 'username = ?',
+      whereArgs: [username],
+    );
+    if (existing.isNotEmpty) return null;
+    final id = await db.insert('users', {
+      'name': name,
+      'username': username,
+      'passwordHash': _hash(password),
+    });
+    // Laporan lama (sebelum ada akun) diakui milik akun pertama yang daftar.
+    final cols = await db.rawQuery('PRAGMA table_info(reports)');
+    if (cols.any((c) => c['name'] == 'isMine')) {
+      await db.execute(
+        'UPDATE reports SET userId = ? WHERE userId IS NULL AND isMine = 1',
+        [id],
+      );
+    }
+    await _setSession(db, id);
+    return User(id: id, name: name, username: username);
+  }
+
+  static Future<User?> login(String username, String password) async {
+    final db = await _open();
+    final rows = await db.query(
+      'users',
+      where: 'username = ? AND passwordHash = ?',
+      whereArgs: [username, _hash(password)],
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    await _setSession(db, row['id'] as int);
+    return User(
+      id: row['id'] as int,
+      name: row['name'] as String,
+      username: row['username'] as String,
+    );
+  }
+
+  static Future<void> _setSession(Database db, int userId) async {
+    await db.insert('session', {
+      'id': 1,
+      'userId': userId,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<User?> currentUser() async {
+    final db = await _open();
+    final rows = await db.rawQuery(
+      'SELECT u.id, u.name, u.username FROM session s '
+      'JOIN users u ON u.id = s.userId WHERE s.id = 1',
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    return User(
+      id: row['id'] as int,
+      name: row['name'] as String,
+      username: row['username'] as String,
+    );
+  }
+
+  static Future<void> logout() async {
+    final db = await _open();
+    await db.delete('session', where: 'id = ?', whereArgs: [1]);
   }
 
   static Future<List<LostItem>> loadAll() async {
@@ -237,11 +342,39 @@ class _HomePageState extends State<HomePage> {
   ];
 
   final List<LostItem> items = [];
+  User? currentUser;
+  bool booting = true;
 
   @override
   void initState() {
     super.initState();
     initItems();
+    loadSession();
+  }
+
+  Future<void> loadSession() async {
+    final user = await ReportDb.currentUser();
+    if (!mounted) return;
+    setState(() {
+      currentUser = user;
+      booting = false;
+    });
+  }
+
+  Future<void> onAuthed(User user) async {
+    setState(() {
+      currentUser = user;
+    });
+    await refreshItems();
+  }
+
+  Future<void> logout() async {
+    await ReportDb.logout();
+    if (!mounted) return;
+    setState(() {
+      currentUser = null;
+      selectedNavigation = 0;
+    });
   }
 
   Future<void> initItems() async {
@@ -352,6 +485,7 @@ class _HomePageState extends State<HomePage> {
         builder: (context) => ReportPage(
           status: status,
           existing: existing,
+          userId: currentUser?.id,
           onSubmit: (item) async {
             if (item.id == null) {
               await ReportDb.insert(item);
@@ -548,6 +682,14 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (booting) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator(color: primaryGreen)),
+      );
+    }
+    if (currentUser == null) {
+      return AuthPage(onAuthed: onAuthed);
+    }
     return Scaffold(
       body: SafeArea(
         child: selectedNavigation == 0
@@ -651,9 +793,9 @@ class _HomePageState extends State<HomePage> {
                   ],
                 ),
                 const SizedBox(height: 25),
-                const Text(
-                  'Halo, selamat datang! 👋',
-                  style: TextStyle(
+                Text(
+                  'Halo, ${currentUser!.name}! 👋',
+                  style: const TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
                     color: darkGreen,
@@ -914,7 +1056,9 @@ class _HomePageState extends State<HomePage> {
           Expanded(
             child: Builder(
               builder: (context) {
-                final myItems = items.where((item) => item.isMine).toList();
+                final myItems = items
+                    .where((item) => item.userId == currentUser?.id)
+                    .toList();
 
                 if (myItems.isEmpty) {
                   return const Center(
@@ -965,6 +1109,16 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget buildProfile() {
+    final user = currentUser!;
+    final myItems = items.where((item) => item.userId == user.id).toList();
+    final lostCount = myItems.where((item) => item.status == 'Hilang').length;
+    final foundCount = myItems
+        .where((item) => item.status == 'Ditemukan')
+        .length;
+    final initial = user.name.trim().isEmpty
+        ? '?'
+        : user.name.trim()[0].toUpperCase();
+
     return Padding(
       padding: const EdgeInsets.all(22),
       child: Column(
@@ -984,35 +1138,93 @@ class _HomePageState extends State<HomePage> {
               children: [
                 CircleAvatar(
                   radius: 48,
-                  backgroundColor: const Color(0xFFDCE7DC),
-                  child: const Icon(
-                    Icons.person,
-                    size: 55,
-                    color: primaryGreen,
+                  backgroundColor: primaryGreen,
+                  child: Text(
+                    initial,
+                    style: const TextStyle(
+                      fontSize: 40,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 15),
-                const Text(
-                  'Pengguna TemuBarang',
-                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+                Text(
+                  user.name,
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-                const Text(
-                  'Pengguna aplikasi',
-                  style: TextStyle(color: Colors.grey),
+                Text(
+                  '@${user.username}',
+                  style: const TextStyle(color: Colors.grey),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 35),
-          const ProfileMenu(
-            icon: Icons.person_outline,
-            title: 'Informasi Akun',
+          const SizedBox(height: 30),
+          Row(
+            children: [
+              Expanded(
+                child: ProfileStat(label: 'Laporan', value: myItems.length),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: ProfileStat(label: 'Hilang', value: lostCount)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ProfileStat(label: 'Ditemukan', value: foundCount),
+              ),
+            ],
           ),
-          const ProfileMenu(icon: Icons.help_outline, title: 'Bantuan'),
-          const ProfileMenu(
-            icon: Icons.info_outline,
-            title: 'Tentang TemuBarang',
+          const Spacer(),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                showDialog<bool>(
+                  context: context,
+                  builder: (dialogContext) => AlertDialog(
+                    title: const Text('Keluar akun?'),
+                    content: const Text(
+                      'Kamu perlu masuk lagi untuk membuat laporan.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                        child: const Text('Batal'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(dialogContext, true),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red,
+                        ),
+                        child: const Text('Keluar'),
+                      ),
+                    ],
+                  ),
+                ).then((confirmed) {
+                  if (confirmed == true) logout();
+                });
+              },
+              icon: const Icon(Icons.logout, color: Colors.red),
+              label: const Text(
+                'Keluar',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: Colors.red),
+                padding: const EdgeInsets.symmetric(vertical: 15),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13),
+                ),
+              ),
+            ),
           ),
+          const SizedBox(height: 10),
         ],
       ),
     );
@@ -1023,12 +1235,14 @@ class ReportPage extends StatefulWidget {
   final String status;
   final Function(LostItem) onSubmit;
   final LostItem? existing;
+  final int? userId;
 
   const ReportPage({
     super.key,
     required this.status,
     required this.onSubmit,
     this.existing,
+    this.userId,
   });
 
   @override
@@ -1105,7 +1319,7 @@ class _ReportPageState extends State<ReportPage> {
       status: widget.status,
       createdAt: widget.existing?.createdAt ?? DateTime.now(),
       photoPaths: photoPaths,
-      isMine: true,
+      userId: widget.existing?.userId ?? widget.userId,
     );
 
     widget.onSubmit(newItem);
@@ -1667,24 +1881,255 @@ class DetailInfo extends StatelessWidget {
   }
 }
 
-class ProfileMenu extends StatelessWidget {
-  final IconData icon;
-  final String title;
+class ProfileStat extends StatelessWidget {
+  final String label;
+  final int value;
 
-  const ProfileMenu({super.key, required this.icon, required this.title});
+  const ProfileStat({super.key, required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(icon, color: primaryGreen),
-      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
-      trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-      onTap: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$title akan dikembangkan selanjutnya.')),
-        );
-      },
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        children: [
+          Text(
+            '$value',
+            style: const TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: primaryGreen,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AuthPage extends StatefulWidget {
+  final Future<void> Function(User) onAuthed;
+
+  const AuthPage({super.key, required this.onAuthed});
+
+  @override
+  State<AuthPage> createState() => _AuthPageState();
+}
+
+class _AuthPageState extends State<AuthPage> {
+  final nameController = TextEditingController();
+  final usernameController = TextEditingController();
+  final passwordController = TextEditingController();
+
+  bool isRegister = false;
+  bool obscure = true;
+  bool busy = false;
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    usernameController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> submit() async {
+    final name = nameController.text.trim();
+    final username = usernameController.text.trim();
+    final password = passwordController.text;
+
+    if (username.isEmpty || password.isEmpty || (isRegister && name.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Semua kolom wajib diisi.')),
+      );
+      return;
+    }
+    if (isRegister && password.length < 4) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Password minimal 4 karakter.')),
+      );
+      return;
+    }
+
+    setState(() {
+      busy = true;
+    });
+    final user = isRegister
+        ? await ReportDb.register(name, username, password)
+        : await ReportDb.login(username, password);
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+    });
+
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            isRegister
+                ? 'Username sudah dipakai.'
+                : 'Username atau password salah.',
+          ),
+        ),
+      );
+      return;
+    }
+    await widget.onAuthed(user);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(26),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 30),
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: primaryGreen,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Icon(
+                    Icons.travel_explore,
+                    color: Colors.white,
+                    size: 45,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Center(
+                child: Text(
+                  'TemuBarang',
+                  style: TextStyle(
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                    color: darkGreen,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Center(
+                child: Text(
+                  'Temukan kembali barang yang hilang bersama kami.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.black54, fontSize: 13),
+                ),
+              ),
+              const SizedBox(height: 32),
+              Text(
+                isRegister ? 'Buat Akun' : 'Masuk',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: darkGreen,
+                ),
+              ),
+              const SizedBox(height: 16),
+              if (isRegister) ...[
+                TextField(
+                  controller: nameController,
+                  decoration: inputDecoration(
+                    'Nama lengkap',
+                    Icons.badge_outlined,
+                  ),
+                ),
+                const SizedBox(height: 14),
+              ],
+              TextField(
+                controller: usernameController,
+                decoration: inputDecoration(
+                  'Username',
+                  Icons.person_outline,
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: passwordController,
+                obscureText: obscure,
+                decoration: inputDecoration(
+                  'Password',
+                  Icons.lock_outline,
+                ).copyWith(
+                  suffixIcon: IconButton(
+                    onPressed: () {
+                      setState(() {
+                        obscure = !obscure;
+                      });
+                    },
+                    icon: Icon(
+                      obscure
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 22),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: busy ? null : submit,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: primaryGreen,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                  ),
+                  child: busy
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : Text(
+                          isRegister ? 'Daftar' : 'Masuk',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Center(
+                child: TextButton(
+                  onPressed: () {
+                    setState(() {
+                      isRegister = !isRegister;
+                    });
+                  },
+                  child: Text(
+                    isRegister
+                        ? 'Sudah punya akun? Masuk'
+                        : 'Belum punya akun? Daftar',
+                    style: const TextStyle(color: primaryGreen),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
