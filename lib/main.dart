@@ -57,6 +57,7 @@ class LostItem {
   final String location;
   final String description;
   final String status;
+  final String itemStatus;
   final DateTime createdAt;
   final List<String> photoPaths;
   final int? userId;
@@ -69,11 +70,12 @@ class LostItem {
     required this.location,
     required this.description,
     required this.status,
+    String? itemStatus,
     required this.createdAt,
     this.photoPaths = const [],
     this.userId,
     this.phone,
-  });
+  }) : itemStatus = itemStatus ?? (status == 'Hilang' ? 'Hilang' : 'Ketemu');
 
   String get date {
     final now = DateTime.now();
@@ -94,6 +96,7 @@ class LostItem {
     'location': location,
     'description': description,
     'status': status,
+    'itemStatus': itemStatus,
     'createdAt': createdAt.millisecondsSinceEpoch,
     'userId': userId,
     'phone': phone,
@@ -107,6 +110,7 @@ class LostItem {
     location: row['location'] as String,
     description: row['description'] as String,
     status: row['status'] as String,
+    itemStatus: row['itemStatus'] as String?,
     createdAt: DateTime.fromMillisecondsSinceEpoch(row['createdAt'] as int),
     photoPaths: List<String>.from(jsonDecode(row['photos'] as String) as List),
     userId: row['userId'] as int?,
@@ -149,16 +153,17 @@ class ReportDb {
     if (_db != null) return _db!;
     _db = await openDatabase(
       p.join(await getDatabasesPath(), 'temubarang.db'),
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute(
           'CREATE TABLE reports('
           'id INTEGER PRIMARY KEY AUTOINCREMENT, '
           'title TEXT, category TEXT, location TEXT, description TEXT, '
-          'status TEXT, createdAt INTEGER, userId INTEGER, phone TEXT, '
-          'photos TEXT)',
+          'status TEXT, itemStatus TEXT, createdAt INTEGER, userId INTEGER, '
+          'phone TEXT, photos TEXT)',
         );
         await _createAuthTables(db);
+        await _createClaimsTable(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -167,6 +172,15 @@ class ReportDb {
         }
         if (oldVersion < 3) {
           await db.execute('ALTER TABLE reports ADD COLUMN phone TEXT');
+        }
+        if (oldVersion < 4) {
+          await db.execute('ALTER TABLE reports ADD COLUMN itemStatus TEXT');
+          await db.execute(
+            "UPDATE reports SET itemStatus = "
+            "CASE WHEN status = 'Hilang' THEN 'Hilang' ELSE 'Ketemu' END "
+            'WHERE itemStatus IS NULL',
+          );
+          await _createClaimsTable(db);
         }
       },
     );
@@ -181,6 +195,15 @@ class ReportDb {
     );
     await db.execute(
       'CREATE TABLE session(id INTEGER PRIMARY KEY, userId INTEGER)',
+    );
+  }
+
+  static Future<void> _createClaimsTable(Database db) async {
+    await db.execute(
+      'CREATE TABLE claims('
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+      'reportId INTEGER, userId INTEGER, createdAt INTEGER, '
+      'UNIQUE(reportId, userId))',
     );
   }
 
@@ -284,6 +307,52 @@ class ReportDb {
   static Future<void> delete(int id) async {
     final db = await _open();
     await db.delete('reports', where: 'id = ?', whereArgs: [id]);
+    await db.delete('claims', where: 'reportId = ?', whereArgs: [id]);
+  }
+
+  static Future<void> setItemStatus(int id, String itemStatus) async {
+    final db = await _open();
+    await db.update(
+      'reports',
+      {'itemStatus': itemStatus},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  static Future<bool> claim(int reportId, int userId) async {
+    final db = await _open();
+    try {
+      await db.insert('claims', {
+        'reportId': reportId,
+        'userId': userId,
+        'createdAt': DateTime.now().millisecondsSinceEpoch,
+      });
+      return true;
+    } on DatabaseException catch (e) {
+      if (e.isUniqueConstraintError()) return false;
+      rethrow;
+    }
+  }
+
+  static Future<List<String>> claimantNames(int reportId) async {
+    final db = await _open();
+    final rows = await db.rawQuery(
+      'SELECT u.name FROM claims c JOIN users u ON u.id = c.userId '
+      'WHERE c.reportId = ? ORDER BY c.createdAt',
+      [reportId],
+    );
+    return rows.map((r) => r['name'] as String).toList();
+  }
+
+  static Future<bool> hasClaimed(int reportId, int userId) async {
+    final db = await _open();
+    final rows = await db.query(
+      'claims',
+      where: 'reportId = ? AND userId = ?',
+      whereArgs: [reportId, userId],
+    );
+    return rows.isNotEmpty;
   }
 }
 
@@ -526,7 +595,13 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  void openDetail(LostItem item) {
+  Future<void> openDetail(LostItem item) async {
+    final claimants = await ReportDb.claimantNames(item.id!);
+    final claimed =
+        currentUser != null &&
+        await ReportDb.hasClaimed(item.id!, currentUser!.id);
+    if (!mounted) return;
+    final isMine = item.userId == currentUser?.id;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -601,7 +676,13 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                 const SizedBox(height: 20),
-                StatusBadge(status: item.status),
+                Row(
+                  children: [
+                    StatusBadge(status: item.status),
+                    const SizedBox(width: 6),
+                    ItemStatusBadge(itemStatus: item.itemStatus),
+                  ],
+                ),
                 const SizedBox(height: 12),
                 Text(
                   item.title,
@@ -633,7 +714,98 @@ class _HomePageState extends State<HomePage> {
                   style: const TextStyle(color: Colors.black54, height: 1.6),
                 ),
                 const SizedBox(height: 25),
-                if (item.userId != currentUser?.id)
+                if (isMine && claimants.isNotEmpty) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(13),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE3EDFB),
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.front_hand_outlined,
+                          color: Color(0xFF1D4ED8),
+                          size: 20,
+                        ),
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Text(
+                            'Diklaim oleh: ${claimants.join(', ')}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF1D4ED8),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (isMine && item.itemStatus == 'Hilang')
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: () => markItemStatus(item, 'Ketemu'),
+                      icon: const Icon(Icons.check_circle_outline),
+                      label: const Text('Tandai Sudah Ketemu'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: primaryGreen,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                      ),
+                    ),
+                  ),
+                if (isMine && item.itemStatus == 'Ketemu')
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: () => markItemStatus(item, 'Dikembalikan'),
+                      icon: const Icon(Icons.task_alt),
+                      label: const Text('Tandai Dikembalikan'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: primaryGreen,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                      ),
+                    ),
+                  ),
+                if (!isMine) ...[
+                  if (item.status == 'Ditemukan' &&
+                      item.itemStatus == 'Ketemu' &&
+                      !claimed) ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: () => claimItem(item),
+                        icon: const Icon(Icons.front_hand_outlined),
+                        label: const Text('Klaim: Ini Barangku'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFFD3A878),
+                          padding: const EdgeInsets.symmetric(vertical: 15),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (claimed && item.itemStatus != 'Dikembalikan')
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'Kamu sudah klaim barang ini. '
+                        'Hubungi pelapor untuk janjian ambil.',
+                        style: TextStyle(color: Colors.black54, fontSize: 12),
+                      ),
+                    ),
+                  if (item.itemStatus == 'Dikembalikan')
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'Barang ini sudah dikembalikan ke pemiliknya.',
+                        style: TextStyle(color: Colors.black54, fontSize: 12),
+                      ),
+                    ),
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.icon(
@@ -646,11 +818,46 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                   ),
+                ],
               ],
             ),
           ),
         );
       },
+    );
+  }
+
+  Future<void> markItemStatus(LostItem item, String newStatus) async {
+    Navigator.pop(context);
+    await ReportDb.setItemStatus(item.id!, newStatus);
+    await refreshItems();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          newStatus == 'Ketemu'
+              ? 'Mantap! Barang ditandai sudah ketemu.'
+              : 'Barang ditandai sudah dikembalikan.',
+        ),
+        backgroundColor: primaryGreen,
+      ),
+    );
+  }
+
+  Future<void> claimItem(LostItem item) async {
+    Navigator.pop(context);
+    final ok = await ReportDb.claim(item.id!, currentUser!.id);
+    await refreshItems();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Klaim terkirim! Hubungi pelapor untuk mengambil barang.'
+              : 'Kamu sudah klaim barang ini.',
+        ),
+        backgroundColor: primaryGreen,
+      ),
     );
   }
 
@@ -1353,6 +1560,7 @@ class _ReportPageState extends State<ReportPage> {
       location: locationController.text.trim(),
       description: descriptionController.text.trim(),
       status: widget.status,
+      itemStatus: widget.existing?.itemStatus,
       createdAt: widget.existing?.createdAt ?? DateTime.now(),
       photoPaths: photoPaths,
       userId: widget.existing?.userId ?? widget.userId,
@@ -1767,7 +1975,17 @@ class ItemCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  StatusBadge(status: item.status),
+                  Row(
+                    children: [
+                      StatusBadge(status: item.status),
+                      if (item.itemStatus == 'Dikembalikan' ||
+                          (item.status == 'Hilang' &&
+                              item.itemStatus == 'Ketemu')) ...[
+                        const SizedBox(width: 6),
+                        ItemStatusBadge(itemStatus: item.itemStatus),
+                      ],
+                    ],
+                  ),
                   const SizedBox(height: 8),
                   Text(
                     item.title,
@@ -1856,6 +2074,56 @@ class StatusBadge extends StatelessWidget {
           fontWeight: FontWeight.bold,
           color: isLost ? const Color(0xFFEA580C) : const Color(0xFF526F5A),
         ),
+      ),
+    );
+  }
+}
+
+class ItemStatusBadge extends StatelessWidget {
+  final String itemStatus;
+
+  const ItemStatusBadge({super.key, required this.itemStatus});
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color bg, Color fg, IconData icon) = switch (itemStatus) {
+      'Ketemu' => (
+        const Color(0xFFE3EDFB),
+        const Color(0xFF1D4ED8),
+        Icons.check_circle_outline,
+      ),
+      'Dikembalikan' => (
+        const Color(0xFFE4EEE4),
+        const Color(0xFF526F5A),
+        Icons.task_alt,
+      ),
+      _ => (
+        const Color(0xFFFFF1E6),
+        const Color(0xFFEA580C),
+        Icons.search_off,
+      ),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: fg),
+          const SizedBox(width: 4),
+          Text(
+            itemStatus,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: fg,
+            ),
+          ),
+        ],
       ),
     );
   }
