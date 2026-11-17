@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
   runApp(const TemuBarangApp());
@@ -59,6 +60,7 @@ class LostItem {
   final DateTime createdAt;
   final List<String> photoPaths;
   final int? userId;
+  final String? phone;
 
   LostItem({
     this.id,
@@ -70,6 +72,7 @@ class LostItem {
     required this.createdAt,
     this.photoPaths = const [],
     this.userId,
+    this.phone,
   });
 
   String get date {
@@ -93,6 +96,7 @@ class LostItem {
     'status': status,
     'createdAt': createdAt.millisecondsSinceEpoch,
     'userId': userId,
+    'phone': phone,
     'photos': jsonEncode(photoPaths),
   };
 
@@ -106,6 +110,7 @@ class LostItem {
     createdAt: DateTime.fromMillisecondsSinceEpoch(row['createdAt'] as int),
     photoPaths: List<String>.from(jsonDecode(row['photos'] as String) as List),
     userId: row['userId'] as int?,
+    phone: row['phone'] as String?,
   );
 }
 
@@ -144,13 +149,14 @@ class ReportDb {
     if (_db != null) return _db!;
     _db = await openDatabase(
       p.join(await getDatabasesPath(), 'temubarang.db'),
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute(
           'CREATE TABLE reports('
           'id INTEGER PRIMARY KEY AUTOINCREMENT, '
           'title TEXT, category TEXT, location TEXT, description TEXT, '
-          'status TEXT, createdAt INTEGER, userId INTEGER, photos TEXT)',
+          'status TEXT, createdAt INTEGER, userId INTEGER, phone TEXT, '
+          'photos TEXT)',
         );
         await _createAuthTables(db);
       },
@@ -158,6 +164,9 @@ class ReportDb {
         if (oldVersion < 2) {
           await db.execute('ALTER TABLE reports ADD COLUMN userId INTEGER');
           await _createAuthTables(db);
+        }
+        if (oldVersion < 3) {
+          await db.execute('ALTER TABLE reports ADD COLUMN phone TEXT');
         }
       },
     );
@@ -276,6 +285,13 @@ class ReportDb {
     final db = await _open();
     await db.delete('reports', where: 'id = ?', whereArgs: [id]);
   }
+}
+
+String? normalizePhone(String raw) {
+  var s = raw.replaceAll(RegExp(r'[\s\-.]'), '');
+  if (s.startsWith('+62')) s = '62${s.substring(3)}';
+  if (s.startsWith('0')) s = '62${s.substring(1)}';
+  return RegExp(r'^628\d{7,12}$').hasMatch(s) ? s : null;
 }
 
 List<LostItem> seedItems() => [
@@ -617,33 +633,51 @@ class _HomePageState extends State<HomePage> {
                   style: const TextStyle(color: Colors.black54, height: 1.6),
                 ),
                 const SizedBox(height: 25),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      ScaffoldMessenger.of(this.context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Fitur kontak akan dikembangkan selanjutnya.',
-                          ),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.chat_bubble_outline),
-                    label: const Text('Hubungi Pelapor'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: primaryGreen,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
+                if (item.userId != currentUser?.id)
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: () => contactReporter(item),
+                      icon: const Icon(Icons.chat_bubble_outline),
+                      label: const Text('Hubungi Pelapor'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: primaryGreen,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
         );
       },
     );
+  }
+
+  Future<void> contactReporter(LostItem item) async {
+    Navigator.pop(context);
+    final phone = normalizePhone(item.phone ?? '');
+    if (phone == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Pelapor tidak menyertakan nomor WhatsApp.'),
+        ),
+      );
+      return;
+    }
+    final text = Uri.encodeComponent(
+      'Halo, saya melihat laporan "${item.title}" di TemuBarang. '
+      'Apakah barang ini masih ada?',
+    );
+    final opened = await launchUrl(
+      Uri.parse('https://wa.me/$phone?text=$text'),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tidak bisa membuka WhatsApp.')),
+      );
+    }
   }
 
   void confirmDelete(LostItem item) {
@@ -1255,6 +1289,7 @@ class _ReportPageState extends State<ReportPage> {
   final titleController = TextEditingController();
   final locationController = TextEditingController();
   final descriptionController = TextEditingController();
+  final phoneController = TextEditingController();
 
   final ImagePicker imagePicker = ImagePicker();
 
@@ -1269,6 +1304,7 @@ class _ReportPageState extends State<ReportPage> {
       titleController.text = existing.title;
       locationController.text = existing.location;
       descriptionController.text = existing.description;
+      phoneController.text = existing.phone ?? '';
       selectedCategory = existing.category;
       photoPaths = List.of(existing.photoPaths);
     }
@@ -1320,6 +1356,9 @@ class _ReportPageState extends State<ReportPage> {
       createdAt: widget.existing?.createdAt ?? DateTime.now(),
       photoPaths: photoPaths,
       userId: widget.existing?.userId ?? widget.userId,
+      phone: phoneController.text.trim().isEmpty
+          ? null
+          : phoneController.text.trim(),
     );
 
     widget.onSubmit(newItem);
@@ -1343,6 +1382,7 @@ class _ReportPageState extends State<ReportPage> {
     titleController.dispose();
     locationController.dispose();
     descriptionController.dispose();
+    phoneController.dispose();
     super.dispose();
   }
 
@@ -1567,6 +1607,33 @@ class _ReportPageState extends State<ReportPage> {
                   }
                   return null;
                 },
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Nomor WhatsApp',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 9),
+              TextFormField(
+                controller: phoneController,
+                keyboardType: TextInputType.phone,
+                decoration: inputDecoration(
+                  'Contoh: 081234567890 (opsional)',
+                  Icons.chat_outlined,
+                ),
+                validator: (value) {
+                  final text = value?.trim() ?? '';
+                  if (text.isEmpty) return null;
+                  if (normalizePhone(text) == null) {
+                    return 'Nomor WA tidak valid, contoh: 081234567890';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Supaya orang lain bisa menghubungi kamu via WhatsApp.',
+                style: TextStyle(color: Colors.grey, fontSize: 11),
               ),
               const SizedBox(height: 20),
               const Text(
