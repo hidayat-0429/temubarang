@@ -1,17 +1,20 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-void main() {
+const supabaseUrl = 'https://wbvdxxkxjamhnjfmmhiw.supabase.co';
+const supabaseKey = 'sb_publishable_5_lw5tLRXPYCC72ZBYutGQ_jp4h0P6g';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Supabase.initialize(url: supabaseUrl, publishableKey: supabaseKey);
   runApp(const TemuBarangApp());
 }
+
+final supabase = Supabase.instance.client;
 
 const Color primaryGreen = Color(0xFF789681);
 const Color darkGreen = Color(0xFF293B30);
@@ -51,7 +54,7 @@ class TemuBarangApp extends StatelessWidget {
 }
 
 class LostItem {
-  final int? id;
+  final String? id;
   final String title;
   final String category;
   final String location;
@@ -60,7 +63,7 @@ class LostItem {
   final String itemStatus;
   final DateTime createdAt;
   final List<String> photoPaths;
-  final int? userId;
+  final String? userId;
   final String? phone;
 
   LostItem({
@@ -96,263 +99,239 @@ class LostItem {
     'location': location,
     'description': description,
     'status': status,
-    'itemStatus': itemStatus,
-    'createdAt': createdAt.millisecondsSinceEpoch,
-    'userId': userId,
+    'item_status': itemStatus,
+    'created_at': createdAt.toIso8601String(),
+    'user_id': userId,
     'phone': phone,
-    'photos': jsonEncode(photoPaths),
+    'photos': photoPaths,
   };
 
   factory LostItem.fromRow(Map<String, Object?> row) => LostItem(
-    id: row['id'] as int?,
+    id: row['id'] as String?,
     title: row['title'] as String,
     category: row['category'] as String,
     location: row['location'] as String,
     description: row['description'] as String,
     status: row['status'] as String,
-    itemStatus: row['itemStatus'] as String?,
-    createdAt: DateTime.fromMillisecondsSinceEpoch(row['createdAt'] as int),
-    photoPaths: List<String>.from(jsonDecode(row['photos'] as String) as List),
-    userId: row['userId'] as int?,
+    itemStatus: row['item_status'] as String?,
+    createdAt: DateTime.parse(row['created_at'] as String),
+    photoPaths: List<String>.from(row['photos'] as List? ?? []),
+    userId: row['user_id'] as String?,
     phone: row['phone'] as String?,
   );
 }
 
 class User {
-  final int id;
+  final String id;
   final String name;
   final String username;
 
   const User({required this.id, required this.name, required this.username});
 }
 
-Future<String> savePhotoFile(XFile image, int index) async {
-  final dir = await getApplicationDocumentsDirectory();
-  final photosDir = Directory(p.join(dir.path, 'photos'));
-  if (!await photosDir.exists()) await photosDir.create(recursive: true);
-  final saved = await File(image.path).copy(
-    p.join(
-      photosDir.path,
-      '${DateTime.now().millisecondsSinceEpoch}_$index.jpg',
-    ),
-  );
-  return saved.path;
-}
-
-Future<void> deletePhotoFiles(Iterable<String> paths) async {
-  for (final path in paths) {
-    final file = File(path);
-    if (await file.exists()) await file.delete();
-  }
-}
-
 class ReportDb {
-  static Database? _db;
-
-  static Future<Database> _open() async {
-    if (_db != null) return _db!;
-    _db = await openDatabase(
-      p.join(await getDatabasesPath(), 'temubarang.db'),
-      version: 4,
-      onCreate: (db, version) async {
-        await db.execute(
-          'CREATE TABLE reports('
-          'id INTEGER PRIMARY KEY AUTOINCREMENT, '
-          'title TEXT, category TEXT, location TEXT, description TEXT, '
-          'status TEXT, itemStatus TEXT, createdAt INTEGER, userId INTEGER, '
-          'phone TEXT, photos TEXT)',
-        );
-        await _createAuthTables(db);
-        await _createClaimsTable(db);
-      },
-      onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await db.execute('ALTER TABLE reports ADD COLUMN userId INTEGER');
-          await _createAuthTables(db);
-        }
-        if (oldVersion < 3) {
-          await db.execute('ALTER TABLE reports ADD COLUMN phone TEXT');
-        }
-        if (oldVersion < 4) {
-          await db.execute('ALTER TABLE reports ADD COLUMN itemStatus TEXT');
-          await db.execute(
-            "UPDATE reports SET itemStatus = "
-            "CASE WHEN status = 'Hilang' THEN 'Hilang' ELSE 'Ketemu' END "
-            'WHERE itemStatus IS NULL',
-          );
-          await _createClaimsTable(db);
-        }
-      },
-    );
-    return _db!;
-  }
-
-  static Future<void> _createAuthTables(Database db) async {
-    await db.execute(
-      'CREATE TABLE users('
-      'id INTEGER PRIMARY KEY AUTOINCREMENT, '
-      'name TEXT, username TEXT UNIQUE, passwordHash TEXT)',
-    );
-    await db.execute(
-      'CREATE TABLE session(id INTEGER PRIMARY KEY, userId INTEGER)',
-    );
-  }
-
-  static Future<void> _createClaimsTable(Database db) async {
-    await db.execute(
-      'CREATE TABLE claims('
-      'id INTEGER PRIMARY KEY AUTOINCREMENT, '
-      'reportId INTEGER, userId INTEGER, createdAt INTEGER, '
-      'UNIQUE(reportId, userId))',
-    );
-  }
-
-  static String _hash(String password) =>
-      sha256.convert(utf8.encode(password)).toString();
+  static String _fakeEmail(String username) => '$username@temubarang.local';
 
   static Future<User?> register(
     String name,
     String username,
     String password,
   ) async {
-    final db = await _open();
-    final existing = await db.query(
-      'users',
-      where: 'username = ?',
-      whereArgs: [username],
+    final existing = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('username', username)
+        .maybeSingle();
+    if (existing != null) return null;
+    final res = await supabase.auth.signUp(
+      email: _fakeEmail(username),
+      password: password,
+      data: {'name': name, 'username': username},
     );
-    if (existing.isNotEmpty) return null;
-    final id = await db.insert('users', {
-      'name': name,
-      'username': username,
-      'passwordHash': _hash(password),
-    });
-    // Laporan lama (sebelum ada akun) diakui milik akun pertama yang daftar.
-    final cols = await db.rawQuery('PRAGMA table_info(reports)');
-    if (cols.any((c) => c['name'] == 'isMine')) {
-      await db.execute(
-        'UPDATE reports SET userId = ? WHERE userId IS NULL AND isMine = 1',
-        [id],
+    if (res.session == null) {
+      throw AuthException(
+        'Konfirmasi email masih aktif di Supabase. Matikan dulu di '
+        'Authentication > Sign In / Up.',
       );
     }
-    await _setSession(db, id);
-    return User(id: id, name: name, username: username);
+    final user = res.user;
+    if (user == null) return null;
+    return User(id: user.id, name: name, username: username);
   }
 
   static Future<User?> login(String username, String password) async {
-    final db = await _open();
-    final rows = await db.query(
-      'users',
-      where: 'username = ? AND passwordHash = ?',
-      whereArgs: [username, _hash(password)],
-    );
-    if (rows.isEmpty) return null;
-    final row = rows.first;
-    await _setSession(db, row['id'] as int);
-    return User(
-      id: row['id'] as int,
-      name: row['name'] as String,
-      username: row['username'] as String,
-    );
-  }
-
-  static Future<void> _setSession(Database db, int userId) async {
-    await db.insert('session', {
-      'id': 1,
-      'userId': userId,
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    try {
+      await supabase.auth.signInWithPassword(
+        email: _fakeEmail(username),
+        password: password,
+      );
+    } on AuthRetryableFetchException {
+      rethrow;
+    } on AuthException {
+      return null;
+    }
+    return currentUser();
   }
 
   static Future<User?> currentUser() async {
-    final db = await _open();
-    final rows = await db.rawQuery(
-      'SELECT u.id, u.name, u.username FROM session s '
-      'JOIN users u ON u.id = s.userId WHERE s.id = 1',
-    );
-    if (rows.isEmpty) return null;
-    final row = rows.first;
+    final session = supabase.auth.currentSession;
+    if (session == null) return null;
+    final row = await supabase
+        .from('profiles')
+        .select('name, username')
+        .eq('id', session.user.id)
+        .single();
     return User(
-      id: row['id'] as int,
+      id: session.user.id,
       name: row['name'] as String,
       username: row['username'] as String,
     );
   }
 
   static Future<void> logout() async {
-    final db = await _open();
-    await db.delete('session', where: 'id = ?', whereArgs: [1]);
+    await supabase.auth.signOut();
   }
 
   static Future<List<LostItem>> loadAll() async {
-    final db = await _open();
-    final rows = await db.query('reports', orderBy: 'createdAt DESC, id DESC');
+    final rows = await supabase
+        .from('reports')
+        .select()
+        .order('created_at', ascending: false);
     return rows.map(LostItem.fromRow).toList();
   }
 
   static Future<void> insert(LostItem item) async {
-    final db = await _open();
-    await db.insert('reports', item.toRow());
+    final row = item.toRow();
+    row.remove('id');
+    await supabase.from('reports').insert(row);
   }
 
   static Future<void> update(LostItem item) async {
-    final db = await _open();
-    await db.update(
-      'reports',
-      item.toRow(),
-      where: 'id = ?',
-      whereArgs: [item.id],
-    );
+    final row = item.toRow();
+    row.remove('id');
+    await supabase.from('reports').update(row).eq('id', item.id!);
   }
 
-  static Future<void> delete(int id) async {
-    final db = await _open();
-    await db.delete('reports', where: 'id = ?', whereArgs: [id]);
-    await db.delete('claims', where: 'reportId = ?', whereArgs: [id]);
+  static Future<void> delete(String id) async {
+    await supabase.from('reports').delete().eq('id', id);
   }
 
-  static Future<void> setItemStatus(int id, String itemStatus) async {
-    final db = await _open();
-    await db.update(
-      'reports',
-      {'itemStatus': itemStatus},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+  static Future<void> setItemStatus(String id, String itemStatus) async {
+    await supabase
+        .from('reports')
+        .update({'item_status': itemStatus}).eq('id', id);
   }
 
-  static Future<bool> claim(int reportId, int userId) async {
-    final db = await _open();
+  static Future<bool> claim(String reportId, String userId) async {
     try {
-      await db.insert('claims', {
-        'reportId': reportId,
-        'userId': userId,
-        'createdAt': DateTime.now().millisecondsSinceEpoch,
+      await supabase.from('claims').insert({
+        'report_id': reportId,
+        'user_id': userId,
       });
       return true;
-    } on DatabaseException catch (e) {
-      if (e.isUniqueConstraintError()) return false;
+    } on PostgrestException catch (e) {
+      if (e.code == '23505') return false;
       rethrow;
     }
   }
 
-  static Future<List<String>> claimantNames(int reportId) async {
-    final db = await _open();
-    final rows = await db.rawQuery(
-      'SELECT u.name FROM claims c JOIN users u ON u.id = c.userId '
-      'WHERE c.reportId = ? ORDER BY c.createdAt',
-      [reportId],
-    );
-    return rows.map((r) => r['name'] as String).toList();
+  static Future<List<String>> claimantNames(String reportId) async {
+    final rows = await supabase
+        .from('claims')
+        .select('created_at, profiles(name)')
+        .eq('report_id', reportId)
+        .order('created_at');
+    return rows
+        .map((r) => (r['profiles'] as Map<String, dynamic>)['name'] as String)
+        .toList();
   }
 
-  static Future<bool> hasClaimed(int reportId, int userId) async {
-    final db = await _open();
-    final rows = await db.query(
-      'claims',
-      where: 'reportId = ? AND userId = ?',
-      whereArgs: [reportId, userId],
+  static Future<bool> hasClaimed(String reportId, String userId) async {
+    final row = await supabase
+        .from('claims')
+        .select('id')
+        .eq('report_id', reportId)
+        .eq('user_id', userId)
+        .maybeSingle();
+    return row != null;
+  }
+
+  static Future<List<String>> uploadPhotos(List<String> localPaths) async {
+    final urls = <String>[];
+    for (var i = 0; i < localPaths.length; i++) {
+      final bytes = await File(localPaths[i]).readAsBytes();
+      final name = '${DateTime.now().microsecondsSinceEpoch}_$i.jpg';
+      await supabase.storage.from('photos').uploadBinary(
+        name,
+        bytes,
+        fileOptions: const FileOptions(contentType: 'image/jpeg'),
+      );
+      urls.add(supabase.storage.from('photos').getPublicUrl(name));
+    }
+    return urls;
+  }
+
+  static Future<void> deletePhotos(Iterable<String> urls) async {
+    final names = <String>[];
+    for (final url in urls) {
+      if (!url.startsWith('http')) continue;
+      final segments = Uri.parse(url).pathSegments;
+      final i = segments.indexOf('photos');
+      if (i >= 0 && i + 1 < segments.length) {
+        names.add(segments.sublist(i + 1).join('/'));
+      }
+    }
+    if (names.isEmpty) return;
+    try {
+      await supabase.storage.from('photos').remove(names);
+    } on Exception {
+      // Gagal hapus file di storage tidak boleh membatalkan hapus laporan.
+    }
+  }
+}
+
+class ItemImage extends StatelessWidget {
+  final String path;
+  final double? width;
+  final double? height;
+  final double? iconSize;
+
+  const ItemImage({
+    super.key,
+    required this.path,
+    this.width,
+    this.height,
+    this.iconSize,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Widget error() => Container(
+      width: width,
+      height: height,
+      color: const Color(0xFFE8EFE8),
+      child: Icon(
+        Icons.broken_image_outlined,
+        size: iconSize,
+        color: primaryGreen,
+      ),
     );
-    return rows.isNotEmpty;
+    if (path.startsWith('http')) {
+      return Image.network(
+        path,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => error(),
+      );
+    }
+    return Image.file(
+      File(path),
+      width: width,
+      height: height,
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) => error(),
+    );
   }
 }
 
@@ -362,46 +341,6 @@ String? normalizePhone(String raw) {
   if (s.startsWith('0')) s = '62${s.substring(1)}';
   return RegExp(r'^628\d{7,12}$').hasMatch(s) ? s : null;
 }
-
-List<LostItem> seedItems() => [
-  LostItem(
-    title: 'Dompet warna hitam',
-    category: 'Dompet',
-    location: 'Area Kampus',
-    description:
-        'Dompet warna hitam tertinggal di sekitar area kampus. '
-        'Di dalamnya terdapat beberapa kartu.',
-    status: 'Hilang',
-    createdAt: DateTime.now(),
-  ),
-  LostItem(
-    title: 'Headphone Bluetooth',
-    category: 'Elektronik',
-    location: 'Perpustakaan',
-    description:
-        'Headphone Bluetooth warna putih ditemukan di meja '
-        'perpustakaan.',
-    status: 'Ditemukan',
-    createdAt: DateTime.now(),
-  ),
-  LostItem(
-    title: 'Kartu mahasiswa',
-    category: 'Dokumen',
-    location: 'Gedung Fakultas',
-    description:
-        'Kartu mahasiswa ditemukan di dekat pintu masuk gedung fakultas.',
-    status: 'Ditemukan',
-    createdAt: DateTime.now().subtract(const Duration(days: 1)),
-  ),
-  LostItem(
-    title: 'Jam tangan',
-    category: 'Aksesoris',
-    location: 'Lapangan Kampus',
-    description: 'Jam tangan tertinggal di sekitar lapangan kampus.',
-    status: 'Hilang',
-    createdAt: DateTime.now().subtract(const Duration(days: 1)),
-  ),
-];
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -433,12 +372,26 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    initItems();
+    refreshItems();
     loadSession();
   }
 
+  void showServerError() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Tidak bisa terhubung ke server. Coba lagi.'),
+      ),
+    );
+  }
+
   Future<void> loadSession() async {
-    final user = await ReportDb.currentUser();
+    User? user;
+    try {
+      user = await ReportDb.currentUser();
+    } on Exception {
+      showServerError();
+    }
     if (!mounted) return;
     setState(() {
       currentUser = user;
@@ -454,7 +407,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> logout() async {
-    await ReportDb.logout();
+    try {
+      await ReportDb.logout();
+    } on Exception {
+      // Sesi lokal tetap dibuang walau server tidak terjangkau.
+    }
     if (!mounted) return;
     setState(() {
       currentUser = null;
@@ -462,23 +419,18 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> initItems() async {
-    if ((await ReportDb.loadAll()).isEmpty) {
-      for (final item in seedItems()) {
-        await ReportDb.insert(item);
-      }
-    }
-    await refreshItems();
-  }
-
   Future<void> refreshItems() async {
-    final saved = await ReportDb.loadAll();
-    if (!mounted) return;
-    setState(() {
-      items
-        ..clear()
-        ..addAll(saved);
-    });
+    try {
+      final saved = await ReportDb.loadAll();
+      if (!mounted) return;
+      setState(() {
+        items
+          ..clear()
+          ..addAll(saved);
+      });
+    } on Exception {
+      showServerError();
+    }
   }
 
   List<LostItem> get searchCategoryItems {
@@ -576,7 +528,7 @@ class _HomePageState extends State<HomePage> {
               await ReportDb.insert(item);
             } else {
               final old = items.firstWhere((e) => e.id == item.id);
-              await deletePhotoFiles(
+              await ReportDb.deletePhotos(
                 old.photoPaths.where((path) => !item.photoPaths.contains(path)),
               );
               await ReportDb.update(item);
@@ -596,10 +548,17 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> openDetail(LostItem item) async {
-    final claimants = await ReportDb.claimantNames(item.id!);
-    final claimed =
-        currentUser != null &&
-        await ReportDb.hasClaimed(item.id!, currentUser!.id);
+    List<String> claimants;
+    bool claimed;
+    try {
+      claimants = await ReportDb.claimantNames(item.id!);
+      claimed =
+          currentUser != null &&
+          await ReportDb.hasClaimed(item.id!, currentUser!.id);
+    } on Exception {
+      showServerError();
+      return;
+    }
     if (!mounted) return;
     final isMine = item.userId == currentUser?.id;
     showModalBottomSheet(
@@ -636,19 +595,11 @@ class _HomePageState extends State<HomePage> {
                       width: double.infinity,
                       child: PageView.builder(
                         itemCount: item.photoPaths.length,
-                        itemBuilder: (context, index) => Image.file(
-                          File(item.photoPaths[index]),
+                        itemBuilder: (context, index) => ItemImage(
+                          path: item.photoPaths[index],
                           width: double.infinity,
                           height: 220,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Container(
-                            color: const Color(0xFFE8EFE8),
-                            child: const Icon(
-                              Icons.broken_image_outlined,
-                              size: 60,
-                              color: primaryGreen,
-                            ),
-                          ),
+                          iconSize: 60,
                         ),
                       ),
                     ),
@@ -829,7 +780,12 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> markItemStatus(LostItem item, String newStatus) async {
     Navigator.pop(context);
-    await ReportDb.setItemStatus(item.id!, newStatus);
+    try {
+      await ReportDb.setItemStatus(item.id!, newStatus);
+    } on Exception {
+      showServerError();
+      return;
+    }
     await refreshItems();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -846,7 +802,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> claimItem(LostItem item) async {
     Navigator.pop(context);
-    final ok = await ReportDb.claim(item.id!, currentUser!.id);
+    bool ok;
+    try {
+      ok = await ReportDb.claim(item.id!, currentUser!.id);
+    } on Exception {
+      showServerError();
+      return;
+    }
     await refreshItems();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -910,8 +872,13 @@ class _HomePageState extends State<HomePage> {
     ).then((confirmed) async {
       if (confirmed != true || !mounted) return;
 
-      await ReportDb.delete(item.id!);
-      await deletePhotoFiles(item.photoPaths);
+      try {
+        await ReportDb.delete(item.id!);
+      } on Exception {
+        showServerError();
+        return;
+      }
+      await ReportDb.deletePhotos(item.photoPaths);
       await refreshItems();
 
       if (!mounted) return;
@@ -957,6 +924,7 @@ class _HomePageState extends State<HomePage> {
           setState(() {
             selectedNavigation = index;
           });
+          if (index == 0) refreshItems();
         },
         backgroundColor: Colors.white,
         indicatorColor: const Color(0xFFDCE7DC),
@@ -1474,9 +1442,9 @@ class _HomePageState extends State<HomePage> {
 
 class ReportPage extends StatefulWidget {
   final String status;
-  final Function(LostItem) onSubmit;
+  final Future<void> Function(LostItem) onSubmit;
   final LostItem? existing;
-  final int? userId;
+  final String? userId;
 
   const ReportPage({
     super.key,
@@ -1502,6 +1470,7 @@ class _ReportPageState extends State<ReportPage> {
 
   String selectedCategory = 'Elektronik';
   List<String> photoPaths = [];
+  bool submitting = false;
 
   @override
   void initState() {
@@ -1533,13 +1502,9 @@ class _ReportPageState extends State<ReportPage> {
       );
       if (images.isEmpty) return;
 
-      final saved = <String>[];
-      for (var i = 0; i < images.length; i++) {
-        saved.add(await savePhotoFile(images[i], i));
-      }
       if (!mounted) return;
       setState(() {
-        photoPaths.addAll(saved);
+        photoPaths.addAll(images.map((image) => image.path));
       });
     } catch (e) {
       if (!mounted) return;
@@ -1550,8 +1515,31 @@ class _ReportPageState extends State<ReportPage> {
     }
   }
 
-  void submitReport() {
-    if (!formKey.currentState!.validate()) return;
+  Future<void> submitReport() async {
+    if (!formKey.currentState!.validate() || submitting) return;
+
+    setState(() {
+      submitting = true;
+    });
+
+    List<String> photos;
+    try {
+      final local = photoPaths.where((p) => !p.startsWith('http')).toList();
+      final uploaded = await ReportDb.uploadPhotos(local);
+      var i = 0;
+      photos = photoPaths
+          .map((p) => p.startsWith('http') ? p : uploaded[i++])
+          .toList();
+    } on Exception {
+      if (!mounted) return;
+      setState(() {
+        submitting = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Gagal upload foto. Coba lagi.')),
+      );
+      return;
+    }
 
     final newItem = LostItem(
       id: widget.existing?.id,
@@ -1562,14 +1550,28 @@ class _ReportPageState extends State<ReportPage> {
       status: widget.status,
       itemStatus: widget.existing?.itemStatus,
       createdAt: widget.existing?.createdAt ?? DateTime.now(),
-      photoPaths: photoPaths,
+      photoPaths: photos,
       userId: widget.existing?.userId ?? widget.userId,
       phone: phoneController.text.trim().isEmpty
           ? null
           : phoneController.text.trim(),
     );
 
-    widget.onSubmit(newItem);
+    try {
+      await widget.onSubmit(newItem);
+    } on Exception {
+      if (!mounted) return;
+      setState(() {
+        submitting = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Tidak bisa terhubung ke server. Coba lagi.'),
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1662,20 +1664,10 @@ class _ReportPageState extends State<ReportPage> {
                           children: [
                             ClipRRect(
                               borderRadius: BorderRadius.circular(13),
-                              child: Image.file(
-                                File(photoPaths[i]),
+                              child: ItemImage(
+                                path: photoPaths[i],
                                 width: 100,
                                 height: 110,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => Container(
-                                  width: 100,
-                                  height: 110,
-                                  color: const Color(0xFFE8EFE8),
-                                  child: const Icon(
-                                    Icons.broken_image_outlined,
-                                    color: primaryGreen,
-                                  ),
-                                ),
                               ),
                             ),
                             Positioned(
@@ -1683,15 +1675,9 @@ class _ReportPageState extends State<ReportPage> {
                               right: 4,
                               child: GestureDetector(
                                 onTap: () {
-                                  final path = photoPaths[i];
                                   setState(() {
                                     photoPaths.removeAt(i);
                                   });
-                                  if (!(widget.existing?.photoPaths
-                                          .contains(path) ??
-                                      false)) {
-                                    deletePhotoFiles([path]);
-                                  }
                                 },
                                 child: Container(
                                   padding: const EdgeInsets.all(3),
@@ -1861,11 +1847,23 @@ class _ReportPageState extends State<ReportPage> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: submitReport,
-                  icon: const Icon(Icons.send_rounded),
-                  label: const Text(
-                    'Kirim Laporan',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  onPressed: submitting ? null : submitReport,
+                  icon: submitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.send_rounded),
+                  label: Text(
+                    submitting ? 'Mengirim...' : 'Kirim Laporan',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                   style: FilledButton.styleFrom(
                     backgroundColor: primaryGreen,
@@ -1943,21 +1941,11 @@ class ItemCard extends StatelessWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(13),
               child: item.photoPaths.isNotEmpty
-                  ? Image.file(
-                      File(item.photoPaths.first),
+                  ? ItemImage(
+                      path: item.photoPaths.first,
                       width: 95,
                       height: 100,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
-                        width: 95,
-                        height: 100,
-                        color: const Color(0xFFE8EFE8),
-                        child: const Icon(
-                          Icons.broken_image_outlined,
-                          size: 37,
-                          color: primaryGreen,
-                        ),
-                      ),
+                      iconSize: 37,
                     )
                   : Container(
                       width: 95,
@@ -2289,9 +2277,9 @@ class _AuthPageState extends State<AuthPage> {
       );
       return;
     }
-    if (isRegister && password.length < 4) {
+    if (isRegister && password.length < 6) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Password minimal 4 karakter.')),
+        const SnackBar(content: Text('Password minimal 6 karakter.')),
       );
       return;
     }
@@ -2299,9 +2287,32 @@ class _AuthPageState extends State<AuthPage> {
     setState(() {
       busy = true;
     });
-    final user = isRegister
-        ? await ReportDb.register(name, username, password)
-        : await ReportDb.login(username, password);
+    User? user;
+    try {
+      user = isRegister
+          ? await ReportDb.register(name, username, password)
+          : await ReportDb.login(username, password);
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+      return;
+    } on Exception {
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Tidak bisa terhubung ke server. Coba lagi.'),
+        ),
+      );
+      return;
+    }
     if (!mounted) return;
     setState(() {
       busy = false;
