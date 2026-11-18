@@ -1495,16 +1495,71 @@ class _ReportPageState extends State<ReportPage> {
   ];
 
   Future<void> pickPhotos() async {
-    try {
-      final images = await imagePicker.pickMultiImage(
-        imageQuality: 75,
-        maxWidth: 1200,
-      );
-      if (images.isEmpty) return;
+    final source = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Tambah Foto',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Foto langsung dari kamera atau pilih dari galeri.',
+                style: TextStyle(color: Colors.grey),
+              ),
+              const SizedBox(height: 22),
+              ReportChoiceCard(
+                icon: Icons.photo_camera_outlined,
+                title: 'Kamera',
+                description: 'Potret barangnya sekarang.',
+                color: primaryGreen,
+                onTap: () => Navigator.pop(context, 'camera'),
+              ),
+              const SizedBox(height: 12),
+              ReportChoiceCard(
+                icon: Icons.photo_library_outlined,
+                title: 'Galeri',
+                description: 'Pilih satu atau beberapa foto yang sudah ada.',
+                color: Colors.orange,
+                onTap: () => Navigator.pop(context, 'gallery'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (source == null) return;
 
-      if (!mounted) return;
+    try {
+      final List<String> added;
+      if (source == 'camera') {
+        final shot = await imagePicker.pickImage(
+          source: ImageSource.camera,
+          imageQuality: 75,
+          maxWidth: 1200,
+        );
+        added = shot == null ? [] : [shot.path];
+      } else {
+        final images = await imagePicker.pickMultiImage(
+          imageQuality: 75,
+          maxWidth: 1200,
+        );
+        added = images.map((image) => image.path).toList();
+      }
+      if (added.isEmpty || !mounted) return;
+
       setState(() {
-        photoPaths.addAll(images.map((image) => image.path));
+        photoPaths.addAll(added);
       });
     } catch (e) {
       if (!mounted) return;
